@@ -1,4 +1,9 @@
+import os
+
+from dbt.exceptions import CompilationException
+
 from test.integration.base import DBTIntegrationTest, use_profile
+
 
 class TestSimpleReference(DBTIntegrationTest):
     @property
@@ -12,17 +17,21 @@ class TestSimpleReference(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
-            'models': {
-                'vars': {
+            'config-version': 2,
+            'vars': {
+                'test': {
                     'var_ref': '{{ ref("view_copy") }}',
-                }
-            }
+                },
+            },
         }
+
+    def setUp(self):
+        super().setUp()
+        # self.use_default_config()
+        self.run_sql_file("seed.sql")
 
     @use_profile('postgres')
     def test__postgres__simple_reference(self):
-        self.use_default_project()
-        self.run_sql_file("seed.sql")
 
         results = self.run_dbt()
         # ephemeral_copy doesn't show up in results
@@ -59,8 +68,6 @@ class TestSimpleReference(DBTIntegrationTest):
 
     @use_profile('snowflake')
     def test__snowflake__simple_reference(self):
-        self.use_default_project()
-        self.run_sql_file("seed.sql")
 
         results = self.run_dbt()
         self.assertEqual(len(results),  8)
@@ -83,8 +90,6 @@ class TestSimpleReference(DBTIntegrationTest):
 
     @use_profile('postgres')
     def test__postgres__simple_reference_with_models(self):
-        self.use_default_project()
-        self.run_sql_file("seed.sql")
 
         # Run materialized_copy, ephemeral_copy, and their dependents
         # ephemeral_copy should not actually be materialized b/c it is ephemeral
@@ -101,8 +106,6 @@ class TestSimpleReference(DBTIntegrationTest):
 
     @use_profile('postgres')
     def test__postgres__simple_reference_with_models_and_children(self):
-        self.use_default_project()
-        self.run_sql_file("seed.sql")
 
         # Run materialized_copy, ephemeral_copy, and their dependents
         # ephemeral_copy should not actually be materialized b/c it is ephemeral
@@ -139,8 +142,6 @@ class TestSimpleReference(DBTIntegrationTest):
 
     @use_profile('snowflake')
     def test__snowflake__simple_reference_with_models(self):
-        self.use_default_project()
-        self.run_sql_file("seed.sql")
 
         # Run materialized_copy & ephemeral_copy
         # ephemeral_copy should not actually be materialized b/c it is ephemeral
@@ -157,8 +158,6 @@ class TestSimpleReference(DBTIntegrationTest):
 
     @use_profile('snowflake')
     def test__snowflake__simple_reference_with_models_and_children(self):
-        self.use_default_project()
-        self.run_sql_file("seed.sql")
 
         # Run materialized_copy, ephemeral_copy, and their dependents
         # ephemeral_copy should not actually be materialized b/c it is ephemeral
@@ -191,3 +190,20 @@ class TestSimpleReference(DBTIntegrationTest):
 
         self.assertTrue('EPHEMERAL_SUMMARY' in created_models)
         self.assertEqual(created_models['EPHEMERAL_SUMMARY'], 'table')
+
+
+class TestErrorReference(DBTIntegrationTest):
+    @property
+    def schema(self):
+        return "simple_reference_003"
+
+    @property
+    def models(self):
+        return "invalid-models"
+
+    @use_profile('postgres')
+    def test_postgres_undefined_value(self):
+        with self.assertRaises(CompilationException) as exc:
+            self.run_dbt(['compile'])
+        path = os.path.join('invalid-models', 'descendant.sql')
+        self.assertIn(path, str(exc.exception))

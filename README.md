@@ -11,8 +11,8 @@
   <a href="https://ci.appveyor.com/project/DrewBanin/dbt/branch/development">
     <img src="https://ci.appveyor.com/api/projects/status/v01rwd3q91jnwp9m/branch/development?svg=true" alt="AppVeyor" />
   </a>
-  <a href="https://slack.getdbt.com">
-    <img src="https://slack.getdbt.com/badge.svg" alt="Slack" />
+  <a href="https://community.getdbt.com">
+    <img src="https://community.getdbt.com/badge.svg" alt="Slack" />
   </a>
 </p>
 
@@ -40,19 +40,19 @@ These select statements, or "models", form a dbt project. Models frequently buil
 
 ## Find out more
 
--   Check out the [Introduction to dbt](https://dbt.readme.io/docs/introduction).
--   Read the [dbt Viewpoint](https://dbt.readme.io/docs/viewpoint).
+-   Check out the [Introduction to dbt](https://docs.getdbt.com/docs/introduction/).
+-   Read the [dbt Viewpoint](https://docs.getdbt.com/docs/about/viewpoint/).
 
 ## Join thousands of analysts in the dbt community
 
--   Join the [chat](http://slack.getdbt.com/) on Slack.
+-   Join the [chat](http://community.getdbt.com/) on Slack.
 -   Find community posts on [dbt Discourse](https://discourse.getdbt.com).
 
 ## Reporting bugs and contributing code
 
--   Want to report a bug or request a feature? Let us know on [Slack](http://slack.getdbt.com/), or open [an issue](https://github.com/fishtown-analytics/dbt/issues/new).
+-   Want to report a bug or request a feature? Let us know on [Slack](http://community.getdbt.com/), or open [an issue](https://github.com/fishtown-analytics/dbt/issues/new).
 -   Want to help us build dbt? Check out the [Contributing Getting Started Guide](/CONTRIBUTING.md)
 
 ## Code of Conduct
 
-Everyone interacting in the dbt project's codebases, issue trackers, chat rooms, and mailing lists is expected to follow the [PyPA Code of Conduct](https://www.pypa.io/en/latest/code-of-conduct/).
+Everyone interacting in the dbt project's codebases, issue trackers, chat rooms, and mailing lists is expected to follow the [dbt Code of Conduct](https://community.getdbt.com/code-of-conduct).

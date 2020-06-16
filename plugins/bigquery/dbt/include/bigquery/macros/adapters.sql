@@ -1,78 +1,80 @@
-{% macro partition_by(raw_partition_by) %}
-  {%- if raw_partition_by is none -%}
-    {{ return('') }}
-  {% endif %}
 
-  {% set partition_by_clause %}
-    partition by {{ raw_partition_by }}
-  {%- endset -%}
-
-  {{ return(partition_by_clause) }}
+{% macro partition_by(partition_config) -%}
+    {%- if partition_config is none -%}
+      {% do return('') %}
+    {%- elif partition_config.data_type | lower in ('date','timestamp','datetime') -%}
+        partition by {{ partition_config.render() }}
+    {%- elif partition_config.data_type | lower in ('int64') -%}
+        {%- set range = partition_config.range -%}
+        partition by range_bucket(
+            {{ partition_config.field }},
+            generate_array({{ range.start}}, {{ range.end }}, {{ range.interval }})
+        )
+    {%- endif -%}
 {%- endmacro -%}
-
 
 {% macro cluster_by(raw_cluster_by) %}
   {%- if raw_cluster_by is not none -%}
-  cluster by
-  {% if raw_cluster_by is string -%}
+  cluster by {% if raw_cluster_by is string -%}
     {% set raw_cluster_by = [raw_cluster_by] %}
   {%- endif -%}
   {%- for cluster in raw_cluster_by -%}
     {{ cluster }}
-    {%- if not loop.last -%},{%- endif -%}
+    {%- if not loop.last -%}, {% endif -%}
   {%- endfor -%}
 
   {% endif %}
 
 {%- endmacro -%}
 
-{% macro bigquery_table_options(persist_docs, temporary) %}
-  {% set opts = {} %}
 
-  {% set description = get_relation_comment(persist_docs, model) %}
-  {%- if description is not none -%}
-    {% do opts.update({'description': "'" ~ description ~ "'"}) %}
-  {% endif %}
-  {% if temporary %}
-    {% do opts.update({'expiration_timestamp': 'TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 12 hour)'}) %}
-  {% endif %}
+{% macro bigquery_table_options(config, node, temporary) %}
+  {% set opts = adapter.get_table_options(config, node, temporary) %}
 
-  OPTIONS({% for opt_key, opt_val in opts.items() %}
-    {{ opt_key }}={{ opt_val }}
-  {% endfor %})
+  {% set options -%}
+    OPTIONS({% for opt_key, opt_val in opts.items() %}
+      {{ opt_key }}={{ opt_val }}{{ "," if not loop.last }}
+    {% endfor %})
+  {%- endset %}
+  {%- do return(options) -%}
 {%- endmacro -%}
 
 {% macro bigquery__create_table_as(temporary, relation, sql) -%}
   {%- set raw_partition_by = config.get('partition_by', none) -%}
   {%- set raw_cluster_by = config.get('cluster_by', none) -%}
-  {%- set raw_persist_docs = config.get('persist_docs', {}) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {%- set partition_config = adapter.parse_partition_by(raw_partition_by) -%}
+
+  {{ sql_header if sql_header is not none }}
 
   create or replace table {{ relation }}
-  {{ partition_by(raw_partition_by) }}
+  {{ partition_by(partition_config) }}
   {{ cluster_by(raw_cluster_by) }}
-  {{ bigquery_table_options(persist_docs=raw_persist_docs, temporary=temporary) }}
+  {{ bigquery_table_options(config, model, temporary) }}
   as (
     {{ sql }}
   );
-{% endmacro %}
 
+{%- endmacro -%}
 
 {% macro bigquery__create_view_as(relation, sql) -%}
-  {%- set raw_persist_docs = config.get('persist_docs', {}) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
 
   create or replace view {{ relation }}
-  {{ bigquery_table_options(persist_docs=raw_persist_docs, temporary=false) }}
-  as (
-    {{ sql }}
-  );
+  {{ bigquery_table_options(config, model, temporary=false) }}
+  as {{ sql }};
+
 {% endmacro %}
 
-{% macro bigquery__create_schema(database_name, schema_name) -%}
-  {{ adapter.create_schema(database_name, schema_name) }}
+{% macro bigquery__create_schema(relation) -%}
+  {{ adapter.create_schema(relation) }}
 {% endmacro %}
 
-{% macro bigquery__drop_schema(database_name, schema_name) -%}
-  {{ adapter.drop_schema(database_name, schema_name) }}
+{% macro bigquery__drop_schema(relation) -%}
+  {{ adapter.drop_schema(relation) }}
 {% endmacro %}
 
 {% macro bigquery__drop_relation(relation) -%}
@@ -86,9 +88,9 @@
 {% endmacro %}
 
 
-{% macro bigquery__list_relations_without_caching(information_schema, schema) -%}
-  {{ return(adapter.list_relations_without_caching(information_schema, schema)) }}
-{% endmacro %}
+{% macro bigquery__list_relations_without_caching(schema_relation) -%}
+  {{ return(adapter.list_relations_without_caching(schema_relation)) }}
+{%- endmacro %}
 
 
 {% macro bigquery__current_timestamp() -%}
@@ -96,11 +98,32 @@
 {%- endmacro %}
 
 
-{% macro bigquery__list_schemas(database) %}
-  {{ return(adapter.list_schemas()) }}
+{% macro bigquery__snapshot_string_as_time(timestamp) -%}
+    {%- set result = 'TIMESTAMP("' ~ timestamp ~ '")' -%}
+    {{ return(result) }}
+{%- endmacro %}
+
+
+{% macro bigquery__list_schemas(database) -%}
+  {{ return(adapter.list_schemas(database)) }}
 {% endmacro %}
 
 
 {% macro bigquery__check_schema_exists(information_schema, schema) %}
   {{ return(adapter.check_schema_exists(information_schema.database, schema)) }}
+{% endmacro %}
+
+{#-- relation-level macro is not implemented. This is handled in the CTAs statement #}
+{% macro bigquery__persist_docs(relation, model, for_relation, for_columns) -%}
+  {% if for_columns and config.persist_column_docs() and model.columns %}
+    {% do alter_column_comment(relation, model.columns) %}
+  {% endif %}
+{% endmacro %}
+
+{% macro bigquery__alter_column_comment(relation, column_dict) -%}
+  {% do adapter.update_column_descriptions(relation, column_dict) %}
+{% endmacro %}
+
+{% macro bigquery__rename_relation(from_relation, to_relation) -%}
+  {% do adapter.rename_relation(from_relation, to_relation) %}
 {% endmacro %}

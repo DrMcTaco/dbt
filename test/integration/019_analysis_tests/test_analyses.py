@@ -18,6 +18,7 @@ class TestAnalyses(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            "config-version": 2,
             "analysis-paths": [self.analysis_path()]
         }
 
@@ -26,7 +27,7 @@ class TestAnalyses(DBTIntegrationTest):
             self.assertEqual(fp.read().strip(), expected)
 
     @use_profile('postgres')
-    def test_analyses(self):
+    def test_postgres_analyses(self):
         compiled_analysis_path = os.path.normpath('target/compiled/test/analysis')
         path_1 = os.path.join(compiled_analysis_path, 'analysis.sql')
         path_2 = os.path.join(compiled_analysis_path, 'raw_stuff.sql')

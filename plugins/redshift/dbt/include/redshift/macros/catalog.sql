@@ -1,10 +1,7 @@
 
-{% macro redshift__get_base_catalog(information_schemas) -%}
+{% macro redshift__get_base_catalog(information_schema, schemas) -%}
   {%- call statement('base_catalog', fetch_result=True) -%}
-    {% if (information_schemas | length) != 1 %}
-        {{ exceptions.raise_compiler_error('redshift get_catalog requires exactly one database') }}
-    {% endif %}
-    {% set database = information_schemas[0].database %}
+    {% set database = information_schema.database %}
     {{ adapter.verify_database(database) }}
 
     with late_binding as (
@@ -24,6 +21,32 @@
              column_type varchar,
              column_index int)
         order by "column_index"
+    ),
+
+    early_binding as (
+        select
+            '{{ database }}'::varchar as table_database,
+            sch.nspname as table_schema,
+            tbl.relname as table_name,
+            case tbl.relkind
+                when 'v' then 'VIEW'
+                else 'BASE TABLE'
+            end as table_type,
+            tbl_desc.description as table_comment,
+            col.attname as column_name,
+            col.attnum as column_index,
+            pg_catalog.format_type(col.atttypid, col.atttypmod) as column_type,
+            col_desc.description as column_comment
+
+        from pg_catalog.pg_namespace sch
+        join pg_catalog.pg_class tbl on tbl.relnamespace = sch.oid
+        join pg_catalog.pg_attribute col on col.attrelid = tbl.oid
+        left outer join pg_catalog.pg_description tbl_desc on (tbl_desc.objoid = tbl.oid and tbl_desc.objsubid = 0)
+        left outer join pg_catalog.pg_description col_desc on (col_desc.objoid = tbl.oid and col_desc.objsubid = col.attnum)
+        where upper(sch.nspname) = upper('{{ schema }}')
+            and tbl.relkind in ('r', 'v', 'f', 'p')
+            and col.attnum > 0
+            and not col.attisdropped
     ),
 
     table_owners as (
@@ -48,41 +71,10 @@
 
     ),
 
-    tables as (
-
-      select
-        table_catalog as table_database,
-        table_schema,
-        table_name,
-        table_type
-
-      from information_schema.tables
-
-    ),
-
-    table_columns as (
-
-        select
-            '{{ database }}'::varchar as table_database,
-            table_schema,
-            table_name,
-            null::varchar as table_comment,
-
-            column_name,
-            ordinal_position as column_index,
-            data_type as column_type,
-            null::varchar as column_comment
-
-
-        from information_schema."columns"
-
-    ),
-
     unioned as (
 
         select *
-        from tables
-        join table_columns using (table_database, table_schema, table_name)
+        from early_binding
 
         union all
 
@@ -97,8 +89,11 @@
     from unioned
     join table_owners using (table_database, table_schema, table_name)
 
-    where table_schema != 'information_schema'
-      and table_schema not like 'pg_%'
+    where (
+        {%- for schema in schemas -%}
+          upper(table_schema) = upper('{{ schema }}'){%- if not loop.last %} or {% endif -%}
+        {%- endfor -%}
+      )
 
     order by "column_index"
   {%- endcall -%}
@@ -106,7 +101,7 @@
   {{ return(load_result('base_catalog').table) }}
 {%- endmacro %}
 
-{% macro redshift__get_extended_catalog(information_schemas) %}
+{% macro redshift__get_extended_catalog(schemas) %}
   {%- call statement('extended_catalog', fetch_result=True) -%}
 
     select
@@ -183,6 +178,11 @@
         (skew_rows is not null) as "stats:skew_rows:include"
 
     from svv_table_info
+    where (
+        {%- for schema in schemas -%}
+          upper(schema) = upper('{{ schema }}'){%- if not loop.last %} or {% endif -%}
+        {%- endfor -%}
+    )
 
   {%- endcall -%}
 
@@ -218,16 +218,16 @@
 {% endmacro %}
 
 
-{% macro redshift__get_catalog(information_schemas) %}
+{% macro redshift__get_catalog(information_schema, schemas) %}
 
     {#-- Compute a left-outer join in memory. Some Redshift queries are
       -- leader-only, and cannot be joined to other compute-based queries #}
 
-    {% set catalog = redshift__get_base_catalog(information_schemas) %}
+    {% set catalog = redshift__get_base_catalog(information_schema, schemas) %}
 
     {% set select_extended =  redshift__can_select_from('svv_table_info') %}
     {% if select_extended %}
-        {% set extended_catalog = redshift__get_extended_catalog() %}
+        {% set extended_catalog = redshift__get_extended_catalog(schemas) %}
         {% set catalog = catalog.join(extended_catalog, 'table_id') %}
     {% else %}
         {{ redshift__no_svv_table_info_warning() }}

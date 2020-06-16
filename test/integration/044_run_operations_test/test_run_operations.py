@@ -14,6 +14,7 @@ class TestOperations(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             "macro-paths": ['macros'],
         }
 
@@ -64,3 +65,7 @@ class TestOperations(DBTIntegrationTest):
     @use_profile('postgres')
     def test__postgres_select(self):
         self.run_operation('select_something', name='world')
+
+    @use_profile('postgres')
+    def test__postgres_access_graph(self):
+        self.run_operation('log_graph')

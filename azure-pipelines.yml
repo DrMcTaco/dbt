@@ -17,7 +17,7 @@ jobs:
   steps:
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.5'
+      versionSpec: '3.7'
       architecture: 'x64'
 
   - script: python -m pip install --upgrade pip && pip install tox
@@ -33,24 +33,22 @@ jobs:
 
   steps:
   - pwsh: |
-      choco install postgresql --params '/Password:password' --params-global --version 10.6
-      Set-Content "c:\program files\postgresql\10\data\pg_hba.conf" "host   all   all   ::1/128        trust"
-      Add-Content "c:\program files\postgresql\10\data\pg_hba.conf" "host   all   all   127.0.0.1/32   trust"
-      # the service name is "postgresql-x64-10", conveniently it's both the display name and the actual name
-      Restart-Service postgresql-x64-10
+      $serviceName = Get-Service -Name postgresql*
+      Set-Service -InputObject $serviceName -StartupType Automatic
+      Start-Service -InputObject $serviceName
 
-      & "C:\program files\postgresql\10\bin\createdb.exe" -U postgres dbt
-      & "C:\program files\postgresql\10\bin\psql.exe"  -U postgres -c "CREATE ROLE root WITH PASSWORD 'password';"
-      & "C:\program files\postgresql\10\bin\psql.exe"  -U postgres -c "ALTER ROLE root WITH LOGIN;"
-      & "C:\program files\postgresql\10\bin\psql.exe"  -U postgres -c "GRANT CREATE, CONNECT ON DATABASE dbt TO root WITH GRANT OPTION;"
-      & "C:\program files\postgresql\10\bin\psql.exe"  -U postgres -c "CREATE ROLE noaccess WITH PASSWORD 'password' NOSUPERUSER;"
-      & "C:\program files\postgresql\10\bin\psql.exe"  -U postgres -c "ALTER ROLE noaccess WITH LOGIN;"
-      & "C:\program files\postgresql\10\bin\psql.exe"  -U postgres -c "GRANT CONNECT ON DATABASE dbt TO noaccess;"
+      createdb.exe -U postgres dbt
+      psql.exe  -U postgres -c "CREATE ROLE root WITH PASSWORD 'password';"
+      psql.exe  -U postgres -c "ALTER ROLE root WITH LOGIN;"
+      psql.exe  -U postgres -c "GRANT CREATE, CONNECT ON DATABASE dbt TO root WITH GRANT OPTION;"
+      psql.exe  -U postgres -c "CREATE ROLE noaccess WITH PASSWORD 'password' NOSUPERUSER;"
+      psql.exe  -U postgres -c "ALTER ROLE noaccess WITH LOGIN;"
+      psql.exe  -U postgres -c "GRANT CONNECT ON DATABASE dbt TO noaccess;"
     displayName: Install postgresql and set up database
 
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.5'
+      versionSpec: '3.7'
       architecture: 'x64'
 
   - script: python -m pip install --upgrade pip && pip install tox
@@ -65,11 +63,11 @@ jobs:
   pool:
     vmImage: 'vs2017-win2016'
   dependsOn: PostgresIntegrationTest
-
+  condition: and(succeeded(), ne(variables['SYSTEM.PULLREQUEST.ISFORK'], 'true'))
   steps:
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.5'
+      versionSpec: '3.7'
       architecture: 'x64'
 
   - script: python -m pip install --upgrade pip && pip install tox
@@ -81,19 +79,21 @@ jobs:
       SNOWFLAKE_TEST_PASSWORD: $(SNOWFLAKE_TEST_PASSWORD)
       SNOWFLAKE_TEST_USER: $(SNOWFLAKE_TEST_USER)
       SNOWFLAKE_TEST_WAREHOUSE: $(SNOWFLAKE_TEST_WAREHOUSE)
+      SNOWFLAKE_TEST_OAUTH_REFRESH_TOKEN: $(SNOWFLAKE_TEST_OAUTH_REFRESH_TOKEN)
+      SNOWFLAKE_TEST_OAUTH_CLIENT_ID: $(SNOWFLAKE_TEST_OAUTH_CLIENT_ID)
+      SNOWFLAKE_TEST_OAUTH_CLIENT_SECRET: $(SNOWFLAKE_TEST_OAUTH_CLIENT_SECRET)
     displayName: Run integration tests
 
 - job: BigQueryIntegrationTest
   pool:
     vmImage: 'vs2017-win2016'
   dependsOn: PostgresIntegrationTest
-
+  condition: and(succeeded(), ne(variables['SYSTEM.PULLREQUEST.ISFORK'], 'true'))
   steps:
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.5'
+      versionSpec: '3.7'
       architecture: 'x64'
-
   - script: python -m pip install --upgrade pip && pip install tox
     displayName: 'Install dependencies'
   - script: python -m tox -e pywin-bigquery
@@ -105,11 +105,11 @@ jobs:
   pool:
     vmImage: 'vs2017-win2016'
   dependsOn: PostgresIntegrationTest
-
+  condition: and(succeeded(), ne(variables['SYSTEM.PULLREQUEST.ISFORK'], 'true'))
   steps:
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '3.5'
+      versionSpec: '3.7'
       architecture: 'x64'
 
   - script: python -m pip install --upgrade pip && pip install tox
@@ -123,3 +123,32 @@ jobs:
       REDSHIFT_TEST_PORT: $(REDSHIFT_TEST_PORT)
       REDSHIFT_TEST_HOST: $(REDSHIFT_TEST_HOST)
     displayName: Run integration tests
+
+- job: BuildWheel
+  pool:
+    vmImage: 'vs2017-win2016'
+  dependsOn:
+    - UnitTest
+    - PostgresIntegrationTest
+    - RedshiftIntegrationTest
+    - SnowflakeIntegrationTest
+    - BigQueryIntegrationTest
+  condition: and(succeeded(), ne(variables['SYSTEM.PULLREQUEST.ISFORK'], 'true'))
+  steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.7'
+        architecture: 'x64'
+    - script: python -m pip install --upgrade pip setuptools && python -m pip install -r requirements.txt && python -m pip install -r dev_requirements.txt
+      displayName: Install dependencies
+    - task: ShellScript@2
+      inputs:
+        scriptPath: scripts/build-wheels.sh
+    - task: CopyFiles@2
+      inputs:
+        contents: 'dist\?(*.whl|*.tar.gz)'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: dists

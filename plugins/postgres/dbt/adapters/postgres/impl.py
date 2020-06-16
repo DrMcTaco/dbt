@@ -1,8 +1,10 @@
+from dataclasses import dataclass
+from typing import Optional, Set
 from dbt.adapters.base.meta import available
+from dbt.adapters.base.impl import AdapterConfig
 from dbt.adapters.sql import SQLAdapter
 from dbt.adapters.postgres import PostgresConnectionManager
 from dbt.adapters.postgres import PostgresColumn
-import dbt.compat
 import dbt.exceptions
 
 
@@ -10,11 +12,16 @@ import dbt.exceptions
 GET_RELATIONS_MACRO_NAME = 'postgres_get_relations'
 
 
+@dataclass
+class PostgresConfig(AdapterConfig):
+    unlogged: Optional[bool] = None
+
+
 class PostgresAdapter(SQLAdapter):
     ConnectionManager = PostgresConnectionManager
     Column = PostgresColumn
 
-    AdapterSpecificConfigs = frozenset({'unlogged'})
+    AdapterSpecificConfigs = PostgresConfig
 
     @classmethod
     def date_function(cls):
@@ -24,10 +31,8 @@ class PostgresAdapter(SQLAdapter):
     def verify_database(self, database):
         if database.startswith('"'):
             database = database.strip('"')
-        else:
-            database = database.lower()
         expected = self.config.credentials.database
-        if database != expected:
+        if database.lower() != expected.lower():
             raise dbt.exceptions.NotImplementedException(
                 'Cross-db references not allowed in {} ({} vs {})'
                 .format(self.type(), database, expected)
@@ -35,36 +40,33 @@ class PostgresAdapter(SQLAdapter):
         # return an empty string on success so macros can call this
         return ''
 
-    def _link_cached_database_relations(self, schemas):
+    def _link_cached_database_relations(self, schemas: Set[str]):
         """
-
-        :param Set[str] schemas: The set of schemas that should have links
-            added.
+        :param schemas: The set of schemas that should have links added.
         """
         database = self.config.credentials.database
         table = self.execute_macro(GET_RELATIONS_MACRO_NAME)
 
-        for (refed_schema, refed_name, dep_schema, dep_name) in table:
-            referenced = self.Relation.create(
-                database=database,
-                schema=refed_schema,
-                identifier=refed_name
-            )
+        for (dep_schema, dep_name, refed_schema, refed_name) in table:
             dependent = self.Relation.create(
                 database=database,
                 schema=dep_schema,
                 identifier=dep_name
             )
+            referenced = self.Relation.create(
+                database=database,
+                schema=refed_schema,
+                identifier=refed_name
+            )
 
             # don't record in cache if this relation isn't in a relevant
             # schema
             if refed_schema.lower() in schemas:
-                self.cache.add_link(dependent, referenced)
+                self.cache.add_link(referenced, dependent)
 
-    def _get_cache_schemas(self, manifest, exec_only=False):
+    def _get_catalog_schemas(self, manifest):
         # postgres/redshift only allow one database (the main one)
-        superself = super(PostgresAdapter, self)
-        schemas = superself._get_cache_schemas(manifest, exec_only=exec_only)
+        schemas = super()._get_catalog_schemas(manifest)
         try:
             return schemas.flatten()
         except dbt.exceptions.RuntimeException as exc:
@@ -75,16 +77,14 @@ class PostgresAdapter(SQLAdapter):
             )
 
     def _link_cached_relations(self, manifest):
-        schemas = set()
-        # only link executable nodes
-        info_schema_name_map = self._get_cache_schemas(manifest,
-                                                       exec_only=True)
-        for db, schema in info_schema_name_map.search():
-            self.verify_database(db.database)
-            schemas.add(schema)
+        schemas: Set[str] = set()
+        relations_schemas = self._get_cache_schemas(manifest)
+        for relation in relations_schemas:
+            self.verify_database(relation.database)
+            schemas.add(relation.schema.lower())
 
         self._link_cached_database_relations(schemas)
 
     def _relations_cache_for_schemas(self, manifest):
-        super(PostgresAdapter, self)._relations_cache_for_schemas(manifest)
+        super()._relations_cache_for_schemas(manifest)
         self._link_cached_relations(manifest)

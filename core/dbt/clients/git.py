@@ -6,8 +6,13 @@ from dbt.logger import GLOBAL_LOGGER as logger
 import dbt.exceptions
 
 
-def clone(repo, cwd, dirname=None, remove_git_dir=False):
-    clone_cmd = ['git', 'clone', '--depth', '1', repo]
+def clone(repo, cwd, dirname=None, remove_git_dir=False, branch=None):
+    clone_cmd = ['git', 'clone', '--depth', '1']
+
+    if branch is not None:
+        clone_cmd.extend(['--branch', branch])
+
+    clone_cmd.append(repo)
 
     if dirname is not None:
         clone_cmd.append(dirname)
@@ -81,21 +86,25 @@ def clone_and_checkout(repo, cwd, dirname=None, remove_git_dir=False,
     start_sha = None
     if exists:
         directory = exists.group(1)
-        logger.debug('Updating existing dependency %s.', directory)
+        logger.debug('Updating existing dependency {}.', directory)
     else:
         matches = re.match("Cloning into '(.+)'", err.decode('utf-8'))
+        if matches is None:
+            raise dbt.exceptions.RuntimeException(
+                f'Error cloning {repo} - never saw "Cloning into ..." from git'
+            )
         directory = matches.group(1)
-        logger.debug('Pulling new dependency %s.', directory)
+        logger.debug('Pulling new dependency {}.', directory)
     full_path = os.path.join(cwd, directory)
     start_sha = get_current_sha(full_path)
     checkout(full_path, repo, branch)
     end_sha = get_current_sha(full_path)
     if exists:
         if start_sha == end_sha:
-            logger.debug('  Already at %s, nothing to do.', start_sha[:7])
+            logger.debug('  Already at {}, nothing to do.', start_sha[:7])
         else:
-            logger.debug('  Updated checkout from %s to %s.',
+            logger.debug('  Updated checkout from {} to {}.',
                          start_sha[:7], end_sha[:7])
     else:
-        logger.debug('  Checked out at %s.', end_sha[:7])
+        logger.debug('  Checked out at {}.', end_sha[:7])
     return directory

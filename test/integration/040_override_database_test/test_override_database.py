@@ -18,7 +18,7 @@ class BaseOverrideDatabase(DBTIntegrationTest):
         if self.adapter_type == 'snowflake':
             return os.getenv('SNOWFLAKE_TEST_DATABASE')
         else:
-            return super(BaseOverrideDatabase, self).alternative_database
+            return super().alternative_database
 
     def snowflake_profile(self):
         return {
@@ -55,14 +55,16 @@ class BaseOverrideDatabase(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
-            "data-paths": ['data'],
-            'models': {
-                'vars': {
-                    'alternate_db': self.alternative_database,
-                },
+            'config-version': 2,
+            'data-paths': ['data'],
+            'vars': {
+                'alternate_db': self.alternative_database,
             },
             'quoting': {
                 'database': True,
+            },
+            'seeds': {
+                'quote_columns': False,
             }
         }
 
@@ -105,17 +107,18 @@ class TestProjectModelOverride(BaseOverrideDatabase):
             func = lambda x: x
 
         self.use_default_project({
+            'config-version': 2,
+            'vars': {
+                'alternate_db': self.alternative_database,
+            },
             'models': {
-                'vars': {
-                    'alternate_db': self.alternative_database,
-                },
                 'database': self.alternative_database,
                 'test': {
                     'subfolder': {
                         'database': self.default_database,
-                    },
-                },
-            }
+                    }
+                }
+            },
         })
         self.run_dbt_notstrict(['seed'])
 
@@ -145,7 +148,10 @@ class TestProjectSeedOverride(BaseOverrideDatabase):
             func = lambda x: x
 
         self.use_default_project({
-            'seeds': {'database': self.alternative_database}
+            'config-version': 2,
+            'seeds': {
+                'database': self.alternative_database
+            },
         })
         self.run_dbt_notstrict(['seed'])
 

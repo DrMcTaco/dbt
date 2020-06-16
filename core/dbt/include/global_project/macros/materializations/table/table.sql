@@ -49,6 +49,8 @@
 
   {{ run_hooks(post_hooks, inside_transaction=True) }}
 
+  {% do persist_docs(target_relation, model) %}
+
   -- `COMMIT` happens here
   {{ adapter.commit() }}
 
@@ -56,4 +58,6 @@
   {{ drop_relation_if_exists(backup_relation) }}
 
   {{ run_hooks(post_hooks, inside_transaction=False) }}
+
+  {{ return({'relations': [target_relation]}) }}
 {% endmaterialization %}

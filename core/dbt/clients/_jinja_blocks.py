@@ -8,7 +8,7 @@ def regex(pat):
     return re.compile(pat, re.DOTALL | re.MULTILINE)
 
 
-class BlockData(object):
+class BlockData:
     """raw plaintext data from the top level of the file."""
     def __init__(self, contents):
         self.block_type_name = '__dbt__data'
@@ -16,7 +16,7 @@ class BlockData(object):
         self.full_block = contents
 
 
-class BlockTag(object):
+class BlockTag:
     def __init__(self, block_type_name, block_name, contents=None,
                  full_block=None, **kw):
         self.block_type_name = block_type_name
@@ -69,7 +69,7 @@ BLOCK_START_PATTERN = regex(''.join((
 
 RAW_BLOCK_PATTERN = regex(''.join((
     r'(?:\s*\{\%\-|\{\%)\s*raw\s*(?:\-\%\}\s*|\%\})',
-    r'(?:.*)',
+    r'(?:.*?)',
     r'(?:\s*\{\%\-|\{\%)\s*endraw\s*(?:\-\%\}\s*|\%\})',
 )))
 
@@ -85,12 +85,24 @@ STRING_PATTERN = regex(
 QUOTE_START_PATTERN = regex(r'''(?P<quote>(['"]))''')
 
 
-class TagIterator(object):
+class TagIterator:
     def __init__(self, data):
         self.data = data
         self.blocks = []
         self._parenthesis_stack = []
         self.pos = 0
+
+    def linepos(self, end=None) -> str:
+        """Given an absolute position in the input data, return a pair of
+        line number + relative position to the start of the line.
+        """
+        end_val: int = self.pos if end is None else end
+        data = self.data[:end_val]
+        # if not found, rfind returns -1, and -1+1=0, which is perfect!
+        last_line_start = data.rfind('\n') + 1
+        # it's easy to forget this, but line numbers are 1-indexed
+        line_number = data.count('\n') + 1
+        return f'{line_number}:{end_val - last_line_start}'
 
     def advance(self, new_position):
         self.pos = new_position
@@ -278,7 +290,7 @@ _CONTROL_FLOW_END_TAGS = {
 }
 
 
-class BlockIterator(object):
+class BlockIterator:
     def __init__(self, data):
         self.tag_parser = TagIterator(data)
         self.current = None
@@ -320,20 +332,28 @@ class BlockIterator(object):
                     dbt.exceptions.raise_compiler_error((
                         'Got an unexpected control flow end tag, got {} but '
                         'never saw a preceeding {} (@ {})'
-                    ).format(tag.block_type_name, expected, tag.start))
+                    ).format(
+                        tag.block_type_name,
+                        expected,
+                        self.tag_parser.linepos(tag.start)
+                    ))
                 expected = _CONTROL_FLOW_TAGS[found]
                 if expected != tag.block_type_name:
                     dbt.exceptions.raise_compiler_error((
                         'Got an unexpected control flow end tag, got {} but '
                         'expected {} next (@ {})'
-                    ).format(tag.block_type_name, expected, tag.start))
+                    ).format(
+                        tag.block_type_name,
+                        expected,
+                        self.tag_parser.linepos(tag.start)
+                    ))
 
             if tag.block_type_name in allowed_blocks:
                 if self.stack:
                     dbt.exceptions.raise_compiler_error((
                         'Got a block definition inside control flow at {}. '
                         'All dbt block definitions must be at the top level'
-                    ).format(tag.start))
+                    ).format(self.tag_parser.linepos(tag.start)))
                 if self.current is not None:
                     dbt.exceptions.raise_compiler_error(
                         duplicate_tags.format(outer=self.current, inner=tag)
@@ -347,6 +367,7 @@ class BlockIterator(object):
 
             elif self.is_current_end(tag):
                 self.last_position = tag.end
+                assert self.current is not None
                 yield BlockTag(
                     block_type_name=self.current.block_type_name,
                     block_name=self.current.block_name,
@@ -356,10 +377,11 @@ class BlockIterator(object):
                 self.current = None
 
         if self.current:
+            linecount = self.data[:self.current.end].count('\n') + 1
             dbt.exceptions.raise_compiler_error((
-                'Reached EOF without finding a close block for '
-                '{0.block_type_name} (from {0.end})'
-            ).format(self.current))
+                'Reached EOF without finding a close tag for '
+                '{} (searched from line {})'
+            ).format(self.current.block_type_name, linecount))
 
         if collect_raw_data:
             raw_data = self.data[self.last_position:]

@@ -1,6 +1,6 @@
 from test.integration.base import DBTIntegrationTest, use_profile
 import os
-from dbt.logger import log_to_stdout, GLOBAL_LOGGER
+from dbt.logger import log_manager
 
 import json
 
@@ -22,15 +22,19 @@ class TestStrictUndefined(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             'analysis-paths': [self.dir('analyses')],
             'snapshot-paths': [self.dir('snapshots')],
             'macro-paths': [self.dir('macros')],
             'data-paths': [self.dir('data')],
             'test-paths': [self.dir('tests')],
+            'seeds': {
+                'quote_columns': False,
+            },
         }
 
     def run_dbt_ls(self, args=None, expect_pass=True):
-        log_to_stdout(GLOBAL_LOGGER)
+        log_manager.stdout_console()
         full_args = ['ls']
         if args is not None:
             full_args = full_args + args
@@ -38,7 +42,7 @@ class TestStrictUndefined(DBTIntegrationTest):
         result = self.run_dbt(args=full_args, expect_pass=expect_pass,
                               strict=False, parser=False)
 
-        log_to_stdout(GLOBAL_LOGGER)
+        log_manager.stdout_console()
         return result
 
     def assertEqualJSON(self, json_str, expected):
@@ -59,7 +63,7 @@ class TestStrictUndefined(DBTIntegrationTest):
     def expect_snapshot_output(self):
         expectations = {
             'name': 'my_snapshot',
-            'selector': 'test.my_snapshot',
+            'selector': 'test.snapshot.my_snapshot',
             'json': {
                 'name': 'my_snapshot',
                 'package_name': 'test',
@@ -79,7 +83,8 @@ class TestStrictUndefined(DBTIntegrationTest):
                     'target_schema': self.unique_schema(),
                     'unique_key': 'id',
                     'strategy': 'timestamp',
-                    'updated_at': 'updated_at'
+                    'updated_at': 'updated_at',
+                    'full_refresh': None,
                 },
                 'alias': 'my_snapshot',
                 'resource_type': 'snapshot',
@@ -107,6 +112,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                     'vars': {},
                     'column_types': {},
                     'persist_docs': {},
+                    'full_refresh': None,
                 },
                 'alias': 'a',
                 'resource_type': 'analysis',
@@ -135,6 +141,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 'ephemeral',
                     'resource_type': 'model',
@@ -154,6 +161,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 'inner',
                     'resource_type': 'model',
@@ -173,6 +181,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 'outer',
                     'resource_type': 'model',
@@ -203,6 +212,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 'outer',
                     'resource_type': 'model',
@@ -217,10 +227,14 @@ class TestStrictUndefined(DBTIntegrationTest):
             'name': 'my_source.my_table',
             'selector': 'source:test.my_source.my_table',
             'json': {
+                'config': {
+                    'enabled': True,
+                },
                 'package_name': 'test',
                 'name': 'my_table',
                 'source_name': 'my_source',
                 'resource_type': 'source',
+                'tags': [],
             },
             'path': self.dir('models/schema.yml'),
         }
@@ -247,6 +261,8 @@ class TestStrictUndefined(DBTIntegrationTest):
                     'vars': {},
                     'column_types': {},
                     'persist_docs': {},
+                    'quote_columns': False,
+                    'full_refresh': None,
                 },
                 'alias': 'seed',
                 'resource_type': 'seed',
@@ -263,7 +279,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                 {
                     'name': 'not_null_outer_id',
                     'package_name': 'test',
-                    'depends_on': {'nodes': ['model.test.outer'], 'macros': []},
+                    'depends_on': {'nodes': ['model.test.outer'], 'macros': ['macro.dbt.test_not_null']},
                     'tags': ['schema'],
                     'config': {
                         'enabled': True,
@@ -276,6 +292,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 'not_null_outer_id',
                     'resource_type': 'test',
@@ -297,6 +314,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 't',
                     'resource_type': 'test',
@@ -304,7 +322,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                 {
                     'name': 'unique_outer_id',
                     'package_name': 'test',
-                    'depends_on': {'nodes': ['model.test.outer'], 'macros': []},
+                    'depends_on': {'nodes': ['model.test.outer'], 'macros': ['macro.dbt.test_unique']},
                     'tags': ['schema'],
                     'config': {
                         'enabled': True,
@@ -317,6 +335,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                         'vars': {},
                         'column_types': {},
                         'persist_docs': {},
+                        'full_refresh': None,
                     },
                     'alias': 'unique_outer_id',
                     'resource_type': 'test',
@@ -331,8 +350,8 @@ class TestStrictUndefined(DBTIntegrationTest):
         # but models don't! they just have (package.name)
         # sources are like models - (package.source_name.table_name)
         expected_default = {
-            'test.my_snapshot',
             'test.ephemeral',
+            'test.snapshot.my_snapshot',
             'test.sub.inner',
             'test.outer',
             'test.seed',

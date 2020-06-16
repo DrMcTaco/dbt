@@ -1,36 +1,62 @@
-
 import json
-import logging
 import os
+import io
 import random
 import shutil
+import sys
 import tempfile
 import time
 import traceback
 import unittest
-import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
 
 import pytest
 import yaml
-from mock import patch
+from unittest.mock import patch
 
 import dbt.main as dbt
 import dbt.flags as flags
-from dbt.adapters.factory import get_adapter, reset_adapters
+from dbt.deprecations import reset_deprecations
+from dbt.adapters.factory import get_adapter, reset_adapters, register_adapter
 from dbt.clients.jinja import template_cache
 from dbt.config import RuntimeConfig
-from dbt.compat import basestring
-from dbt.context import common
-from dbt.logger import GLOBAL_LOGGER as logger
+from dbt.context import providers
+from dbt.logger import GLOBAL_LOGGER as logger, log_manager
 
 
 INITIAL_ROOT = os.getcwd()
 
 
-class FakeArgs(object):
+def normalize(path):
+    """On windows, neither is enough on its own:
+
+    >>> normcase('C:\\documents/ALL CAPS/subdir\\..')
+    'c:\\documents\\all caps\\subdir\\..'
+    >>> normpath('C:\\documents/ALL CAPS/subdir\\..')
+    'C:\\documents\\ALL CAPS'
+    >>> normpath(normcase('C:\\documents/ALL CAPS/subdir\\..'))
+    'c:\\documents\\all caps'
+    """
+    return os.path.normcase(os.path.normpath(path))
+
+
+class Normalized:
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return f'Normalized({self.value!r})'
+
+    def __str__(self):
+        return f'Normalized({self.value!s})'
+
+    def __eq__(self, other):
+        return normalize(self.value) == normalize(other)
+
+
+class FakeArgs:
     def __init__(self):
         self.threads = 1
         self.data = False
@@ -41,28 +67,31 @@ class FakeArgs(object):
         self.single_threaded = False
 
 
-class TestArgs(object):
+class TestArgs:
     def __init__(self, kwargs):
         self.which = 'run'
         self.single_threaded = False
         self.profiles_dir = None
+        self.project_dir = None
         self.__dict__.update(kwargs)
 
 
 def _profile_from_test_name(test_name):
     adapter_names = ('postgres', 'snowflake', 'redshift', 'bigquery', 'presto')
-    adapters_in_name =  sum(x in test_name for x in adapter_names)
-    if adapters_in_name > 1:
-        raise ValueError('test names must only have 1 profile choice embedded')
+    adapters_in_name = sum(x in test_name for x in adapter_names)
+    if adapters_in_name != 1:
+        raise ValueError(
+            'test names must have exactly 1 profile choice embedded, {} has {}'
+            .format(test_name, adapters_in_name)
+        )
 
     for adapter_name in adapter_names:
         if adapter_name in test_name:
             return adapter_name
 
-    warnings.warn(
+    raise ValueError(
         'could not find adapter name in test name {}'.format(test_name)
     )
-    return 'postgres'
 
 
 def _pytest_test_name():
@@ -96,7 +125,14 @@ class DBTIntegrationTest(unittest.TestCase):
     CREATE_SCHEMA_STATEMENT = 'CREATE SCHEMA {}'
     DROP_SCHEMA_STATEMENT = 'DROP SCHEMA IF EXISTS {} CASCADE'
 
-    prefix = "test{}{:04}".format(int(time.time()), random.randint(0, 9999))
+    _randint = random.randint(0, 9999)
+    _runtime_timedelta = (datetime.utcnow() - datetime(1970, 1, 1, 0, 0, 0))
+    _runtime = (
+        (int(_runtime_timedelta.total_seconds() * 1e6)) +
+        _runtime_timedelta.microseconds
+    )
+
+    prefix = f'test{_runtime}{_randint:04}'
     setup_alternate_db = False
 
     @property
@@ -185,7 +221,20 @@ class DBTIntegrationTest(unittest.TestCase):
                         'database': os.getenv('SNOWFLAKE_TEST_DATABASE'),
                         'schema': self.unique_schema(),
                         'warehouse': os.getenv('SNOWFLAKE_TEST_WAREHOUSE'),
-                    }
+                    },
+                    'oauth': {
+                        'type': 'snowflake',
+                        'threads': 4,
+                        'account': os.getenv('SNOWFLAKE_TEST_ACCOUNT'),
+                        'user': os.getenv('SNOWFLAKE_TEST_USER'),
+                        'oauth_client_id': os.getenv('SNOWFLAKE_TEST_OAUTH_CLIENT_ID'),
+                        'oauth_client_secret': os.getenv('SNOWFLAKE_TEST_OAUTH_CLIENT_SECRET'),
+                        'token': os.getenv('SNOWFLAKE_TEST_OAUTH_REFRESH_TOKEN'),
+                        'database': os.getenv('SNOWFLAKE_TEST_DATABASE'),
+                        'schema': self.unique_schema(),
+                        'warehouse': os.getenv('SNOWFLAKE_TEST_WAREHOUSE'),
+                        'authenticator': 'oauth',
+                    },
                 },
                 'target': 'default2'
             }
@@ -292,17 +341,24 @@ class DBTIntegrationTest(unittest.TestCase):
                 os.symlink(src, tst)
         os.symlink(self._logs_dir, os.path.join(self.test_root_dir, 'logs'))
 
+    @property
+    def test_root_realpath(self):
+        if sys.platform == 'darwin':
+            return os.path.realpath(self.test_root_dir)
+        else:
+            return self.test_root_dir
+
     def setUp(self):
+        self.dbt_core_install_root = os.path.dirname(dbt.__file__)
+        log_manager.reset_handlers()
         self.initial_dir = INITIAL_ROOT
         os.chdir(self.initial_dir)
         # before we go anywhere, collect the initial path info
         self._logs_dir = os.path.join(self.initial_dir, 'logs', self.prefix)
-        print('initial_dir={}'.format(self.initial_dir))
         _really_makedirs(self._logs_dir)
         self.test_original_source_path = _pytest_get_test_root()
-        print('test_original_source_path={}'.format(self.test_original_source_path))
-        self.test_root_dir = tempfile.mkdtemp(prefix='dbt-int-test-')
-        print('test_root_dir={}'.format(self.test_root_dir))
+        self.test_root_dir = normalize(tempfile.mkdtemp(prefix='dbt-int-test-'))
+
         os.chdir(self.test_root_dir)
         try:
             self._symlink_test_folders()
@@ -322,10 +378,9 @@ class DBTIntegrationTest(unittest.TestCase):
             raise
 
         self._created_schemas = set()
+        reset_deprecations()
         flags.reset()
         template_cache.clear()
-        # disable capturing warnings
-        logging.captureWarnings(False)
 
         self.use_profile(self._pick_profile())
         self.use_default_project()
@@ -337,6 +392,7 @@ class DBTIntegrationTest(unittest.TestCase):
         base_project_config = {
             'name': 'test',
             'version': '1.0',
+            'config-version': 2,
             'test-paths': [],
             'source-paths': [self.models],
             'profile': 'test',
@@ -385,6 +441,7 @@ class DBTIntegrationTest(unittest.TestCase):
 
         config = RuntimeConfig.from_args(TestArgs(kwargs))
 
+        register_adapter(config)
         adapter = get_adapter(config)
         adapter.cleanup_connections()
         self.adapter_type = adapter.type()
@@ -401,6 +458,7 @@ class DBTIntegrationTest(unittest.TestCase):
         # get any current run adapter and clean up its connections before we
         # reset them. It'll probably be different from ours because
         # handle_and_check() calls reset_adapters().
+        register_adapter(self.config)
         adapter = get_adapter(self.config)
         if adapter is not self.adapter:
             adapter.cleanup_connections()
@@ -427,7 +485,8 @@ class DBTIntegrationTest(unittest.TestCase):
 
     def _create_schema_named(self, database, schema):
         if self.adapter_type == 'bigquery':
-            self.adapter.create_schema(database, schema)
+            relation = self.adapter.Relation.create(database=database, schema=schema)
+            self.adapter.create_schema(relation)
         else:
             schema_fqn = self._get_schema_fqn(database, schema)
             self.run_sql(self.CREATE_SCHEMA_STATEMENT.format(schema_fqn))
@@ -435,9 +494,8 @@ class DBTIntegrationTest(unittest.TestCase):
 
     def _drop_schema_named(self, database, schema):
         if self.adapter_type == 'bigquery' or self.adapter_type == 'presto':
-            self.adapter.drop_schema(
-                database, schema
-            )
+            relation = self.adapter.Relation.create(database=database, schema=schema)
+            self.adapter.drop_schema(relation)
         else:
             schema_fqn = self._get_schema_fqn(database, schema)
             self.run_sql(self.DROP_SCHEMA_STATEMENT.format(schema_fqn))
@@ -463,9 +521,11 @@ class DBTIntegrationTest(unittest.TestCase):
             self._get_schema_fqn(self.default_database, schema)
         )
         # on postgres/redshift, this will make you sad
-        drop_alternative = self.setup_alternate_db and \
-                self.adapter_type not in {'postgres', 'redshift'} and \
-                self.alternative_database
+        drop_alternative = (
+            self.setup_alternate_db and
+            self.adapter_type not in {'postgres', 'redshift'} and
+            self.alternative_database
+        )
         if drop_alternative:
             self._created_schemas.add(
                 self._get_schema_fqn(self.alternative_database, schema)
@@ -485,7 +545,9 @@ class DBTIntegrationTest(unittest.TestCase):
 
     @property
     def project_config(self):
-        return {}
+        return {
+            'config-version': 2,
+        }
 
     @property
     def profile_config(self):
@@ -500,7 +562,24 @@ class DBTIntegrationTest(unittest.TestCase):
 
         return res
 
+
+    def run_dbt_and_capture(self, *args, **kwargs):
+        try:
+            initial_stdout = log_manager.stdout
+            initial_stderr = log_manager.stderr
+            stringbuf = io.StringIO()
+            log_manager.set_output_stream(stringbuf)
+
+            res = self.run_dbt(*args, **kwargs)
+            stdout = stringbuf.getvalue()
+
+        finally:
+            log_manager.set_output_stream(initial_stdout, initial_stderr)
+
+        return res, stdout
+
     def run_dbt_and_check(self, args=None, strict=True, parser=False, profiles_dir=True):
+        log_manager.reset_handlers()
         if args is None:
             args = ["run"]
 
@@ -520,10 +599,6 @@ class DBTIntegrationTest(unittest.TestCase):
         final_args.append('--log-cache-events')
 
         logger.info("Invoking dbt with {}".format(final_args))
-        if args is None:
-            args = ["run"]
-
-        logger.info("Invoking dbt with {}".format(args))
         return dbt.handle_and_check(final_args)
 
     def run_sql_file(self, path, kwargs=None):
@@ -598,10 +673,11 @@ class DBTIntegrationTest(unittest.TestCase):
                 else:
                     return
             except BaseException as e:
-                conn.handle.rollback()
+                if conn.handle and not getattr(conn.handle, 'closed', True):
+                    conn.handle.rollback()
                 print(sql)
                 print(e)
-                raise e
+                raise
             finally:
                 conn.transaction_open = False
 
@@ -726,8 +802,9 @@ class DBTIntegrationTest(unittest.TestCase):
         """
         if name is None:
             name = '__test'
-        with patch.object(common, 'get_adapter', return_value=self.adapter):
-            with self.adapter.connection_named(name) as conn:
+        with patch.object(providers, 'get_adapter', return_value=self.adapter):
+            with self.adapter.connection_named(name):
+                conn = self.adapter.connections.get_thread_connection()
                 yield conn
 
     def get_relation_columns(self, relation):
@@ -741,7 +818,7 @@ class DBTIntegrationTest(unittest.TestCase):
         schema = self.unique_schema() if schema is None else schema
         database = self.default_database if database is None else database
         relation = self.adapter.Relation.create(
-            database = database,
+            database=database,
             schema=schema,
             identifier=table,
             type='table',
@@ -1042,16 +1119,16 @@ class DBTIntegrationTest(unittest.TestCase):
             )
         )
 
-    def assertTableDoesNotExist(self, table, schema=None):
-        columns = self.get_table_columns(table, schema)
+    def assertTableDoesNotExist(self, table, schema=None, database=None):
+        columns = self.get_table_columns(table, schema, database)
 
         self.assertEqual(
             len(columns),
             0
         )
 
-    def assertTableDoesExist(self, table, schema=None):
-        columns = self.get_table_columns(table, schema)
+    def assertTableDoesExist(self, table, schema=None, database=None):
+        columns = self.get_table_columns(table, schema, database)
 
         self.assertGreater(
             len(columns),
@@ -1136,19 +1213,26 @@ def use_profile(profile_name):
     return outer
 
 
-class AnyFloat(object):
+class AnyFloat:
     """Any float. Use this in assertEqual() calls to assert that it is a float.
     """
     def __eq__(self, other):
         return isinstance(other, float)
 
 
-class AnyStringWith(object):
+class AnyString:
+    """Any string. Use this in assertEqual() calls to assert that it is a string.
+    """
+    def __eq__(self, other):
+        return isinstance(other, str)
+
+
+class AnyStringWith:
     def __init__(self, contains=None):
         self.contains = contains
 
     def __eq__(self, other):
-        if not isinstance(other, basestring):
+        if not isinstance(other, str):
             return False
 
         if self.contains is None:

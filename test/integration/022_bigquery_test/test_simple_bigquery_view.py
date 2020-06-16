@@ -1,6 +1,7 @@
-from test.integration.base import DBTIntegrationTest, FakeArgs, use_profile
+from test.integration.base import DBTIntegrationTest, use_profile
 import random
 import time
+
 
 class TestBaseBigQueryRun(DBTIntegrationTest):
 
@@ -15,8 +16,12 @@ class TestBaseBigQueryRun(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             'data-paths': ['data'],
             'macro-paths': ['macros'],
+            'seeds': {
+                'quote_columns': False,
+            },
         }
 
     @property
@@ -28,7 +33,7 @@ class TestBaseBigQueryRun(DBTIntegrationTest):
         test_results = self.run_dbt(['test'], expect_pass=False)
 
         for result in test_results:
-            if 'dupe' in result.node.get('name'):
+            if 'dupe' in result.node.name:
                 self.assertIsNone(result.error)
                 self.assertFalse(result.skipped)
                 self.assertTrue(result.status > 0)
@@ -49,7 +54,8 @@ class TestSimpleBigQueryRun(TestBaseBigQueryRun):
         self.run_dbt(['seed'])
         self.run_dbt(['seed', '--full-refresh'])
         results = self.run_dbt()
-        self.assertEqual(len(results), 5)
+        # Bump expected number of results when adding new model
+        self.assertEqual(len(results), 11)
         self.assert_nondupes_pass()
 
 
@@ -60,7 +66,7 @@ class TestUnderscoreBigQueryRun(TestBaseBigQueryRun):
     def test_bigquery_run_twice(self):
         self.run_dbt(['seed'])
         results = self.run_dbt()
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 11)
         results = self.run_dbt()
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 11)
         self.assert_nondupes_pass()

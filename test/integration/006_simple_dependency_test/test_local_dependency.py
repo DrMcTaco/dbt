@@ -1,6 +1,9 @@
 from test.integration.base import DBTIntegrationTest, use_profile
+import os
 import json
-import mock
+import shutil
+import yaml
+from unittest import mock
 
 import dbt.semver
 import dbt.config
@@ -22,6 +25,15 @@ class BaseDependencyTest(DBTIntegrationTest):
     def configured_schema(self):
         return self.unique_schema() + '_configured'
 
+    def setUp(self):
+        super().setUp()
+        self._created_schemas.add(
+            self._get_schema_fqn(self.default_database, self.base_schema())
+        )
+        self._created_schemas.add(
+            self._get_schema_fqn(self.default_database, self.configured_schema())
+        )
+
     @property
     def packages_config(self):
         return {
@@ -32,16 +44,21 @@ class BaseDependencyTest(DBTIntegrationTest):
             ]
         }
 
+    def run_dbt(self, *args, **kwargs):
+        strict = kwargs.pop('strict', False)
+        kwargs['strict'] = strict
+        return super().run_dbt(*args, **kwargs)
+
 
 class TestSimpleDependency(BaseDependencyTest):
 
     @property
     def schema(self):
-        return "local_dependency_006"
+        return 'local_dependency_006'
 
     @property
     def models(self):
-        return "local_models"
+        return 'local_models'
 
     def base_schema(self):
         return self.unique_schema()
@@ -51,16 +68,40 @@ class TestSimpleDependency(BaseDependencyTest):
 
     @use_profile('postgres')
     def test_postgres_local_dependency(self):
-        self.run_dbt(["deps"])
-        results = self.run_dbt(["run"])
-        self.assertEqual(len(results),  3)
+        self.run_dbt(['deps'])
+        self.run_dbt(['seed'])
+        results = self.run_dbt(['run'])
+        self.assertEqual(len(results),  5)
         self.assertEqual({r.node.schema for r in results},
                          {self.base_schema(), self.configured_schema()})
-        self.assertEqual(
-            len([r.node for r in results
-                 if r.node.schema == self.base_schema()]),
-            2
+
+        base_schema_nodes = [
+            r.node for r in results
+            if r.node.schema == self.base_schema()
+        ]
+        self.assertEqual(len(base_schema_nodes), 4)
+        self.assertTablesEqual('source_override_model', 'seed', self.base_schema(), self.base_schema())
+        self.assertTablesEqual('dep_source_model', 'seed', self.base_schema(), self.base_schema())
+
+    @use_profile('postgres')
+    def test_postgres_no_dependency_paths(self):
+        self.run_dbt(['deps'])
+        self.run_dbt(['seed'])
+        # this should work
+        local_path = os.path.join('local_models', 'my_model.sql')
+        results = self.run_dbt(
+            ['run', '--models',  f'+{local_path}'],
         )
+        # should run the dependency and my_model
+        self.assertEqual(len(results), 2)
+
+        # this should not work
+        dep_path = os.path.join('models', 'model_to_import.sql')
+        results = self.run_dbt(
+            ['run', '--models', f'+{dep_path}'],
+        )
+        # should not run the dependency, because it "doesn't exist".
+        self.assertEqual(len(results), 0)
 
 
 class TestMissingDependency(DBTIntegrationTest):
@@ -76,18 +117,30 @@ class TestMissingDependency(DBTIntegrationTest):
     def test_postgres_missing_dependency(self):
         # dbt should raise a dbt exception, not raise a parse-time TypeError.
         with self.assertRaises(dbt.exceptions.Exception) as exc:
-            self.run_dbt(['compile'])
+            self.run_dbt(['compile'], strict=False)
         message = str(exc.exception)
         self.assertIn('no_such_dependency', message)
         self.assertIn('is undefined', message)
 
 
 class TestSimpleDependencyWithSchema(TestSimpleDependency):
+    def run_dbt(self, cmd, *args, **kwargs):
+        # we can't add this to the config because Sources don't respect dbt_project.yml
+        vars_arg = yaml.safe_dump({
+            'schema_override': self.base_schema(),
+        })
+        cmd.extend(['--vars', vars_arg])
+        return super().run_dbt(cmd, *args, **kwargs)
+
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             'macro-paths': ['schema_override_macros'],
             'models': {
+                'schema': 'dbt_test',
+            },
+            'seeds': {
                 'schema': 'dbt_test',
             }
         }
@@ -103,6 +156,11 @@ class TestSimpleDependencyWithSchema(TestSimpleDependency):
     def test_postgres_local_dependency_out_of_date(self, mock_get):
         mock_get.return_value = dbt.semver.VersionSpecifier.from_version_string('0.0.1')
         self.run_dbt(['deps'])
+        # check seed
+        with self.assertRaises(dbt.exceptions.DbtProjectError) as exc:
+            self.run_dbt(['seed'])
+        self.assertIn('--no-version-check', str(exc.exception))
+        # check run too
         with self.assertRaises(dbt.exceptions.DbtProjectError) as exc:
             self.run_dbt(['run'])
         self.assertIn('--no-version-check', str(exc.exception))
@@ -112,8 +170,9 @@ class TestSimpleDependencyWithSchema(TestSimpleDependency):
     def test_postgres_local_dependency_out_of_date_no_check(self, mock_get):
         mock_get.return_value = dbt.semver.VersionSpecifier.from_version_string('0.0.1')
         self.run_dbt(['deps'])
+        self.run_dbt(['seed', '--no-version-check'])
         results = self.run_dbt(['run', '--no-version-check'])
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(results), 5)
 
 
 class TestSimpleDependencyHooks(DBTIntegrationTest):
@@ -129,6 +188,7 @@ class TestSimpleDependencyHooks(DBTIntegrationTest):
     def project_config(self):
         # these hooks should run first, so nothing to drop
         return {
+            'config-version': 2,
             'on-run-start': [
                 "drop table if exists {{ var('test_create_table') }}",
                 "drop table if exists {{ var('test_create_second_table') }}",
@@ -164,3 +224,40 @@ class TestSimpleDependencyHooks(DBTIntegrationTest):
         results = self.run_dbt(["run", '--vars', cli_vars])
         self.assertEqual(len(results),  2)
         self.assertTablesEqual('actual', 'expected')
+
+
+class TestSimpleDependencyDuplicateName(DBTIntegrationTest):
+    @property
+    def schema(self):
+        return "local_dependency_006"
+
+    @property
+    def models(self):
+        return "local_models"
+
+    @property
+    def packages_config(self):
+        return {
+            "packages": [
+                {
+                    'local': 'duplicate_dependency'
+                }
+            ]
+        }
+
+    def run_dbt(self, *args, **kwargs):
+        strict = kwargs.pop('strict', False)
+        kwargs['strict'] = strict
+        return super().run_dbt(*args, **kwargs)
+
+    @use_profile('postgres')
+    def test_postgres_local_dependency_same_name(self):
+        with self.assertRaises(dbt.exceptions.DependencyException):
+            self.run_dbt(['deps'], expect_pass=False)
+
+    @use_profile('postgres')
+    def test_postgres_local_dependency_same_name_sneaky(self):
+        os.makedirs('dbt_modules')
+        shutil.copytree('./duplicate_dependency', './dbt_modules/duplicate_dependency')
+        with self.assertRaises(dbt.exceptions.CompilationException):
+            self.run_dbt(['compile'], expect_pass=False)

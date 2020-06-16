@@ -26,35 +26,73 @@ class TestSchemaTests(DBTIntegrationTest):
         test_task = TestTask(args, self.config)
         return test_task.run()
 
+    def assertTestFailed(self, result):
+        self.assertIsNone(result.error)
+        self.assertFalse(result.skipped)
+        self.assertTrue(
+            result.status > 0,
+            'test {} did not fail'.format(result.node.name)
+        )
+
+    def assertTestPassed(self, result):
+        self.assertIsNone(result.error)
+        self.assertFalse(result.skipped)
+        # status = # of failing rows
+        self.assertEqual(
+            result.status, 0,
+            'test {} failed'.format(result.node.name)
+        )
+
     @use_profile('postgres')
-    def test_schema_tests(self):
+    def test_postgres_schema_tests(self):
         results = self.run_dbt()
         self.assertEqual(len(results), 5)
         test_results = self.run_schema_validations()
-        # If the disabled model's tests ran, there would be 19 of these.
-        self.assertEqual(len(test_results), 18)
+        # If the disabled model's tests ran, there would be 20 of these.
+        self.assertEqual(len(test_results), 19)
 
         for result in test_results:
             # assert that all deliberately failing tests actually fail
-            if 'failure' in result.node.get('name'):
-                self.assertIsNone(result.error)
-                self.assertFalse(result.skipped)
-                self.assertTrue(
-                    result.status > 0,
-                    'test {} did not fail'.format(result.node.get('name'))
-                )
-
+            if 'failure' in result.node.name:
+                self.assertTestFailed(result)
             # assert that actual tests pass
             else:
-                self.assertIsNone(result.error)
-                self.assertFalse(result.skipped)
-                # status = # of failing rows
-                self.assertEqual(
-                    result.status, 0,
-                    'test {} failed'.format(result.node.get('name'))
-                )
+                self.assertTestPassed(result)
 
         self.assertEqual(sum(x.status for x in test_results), 6)
+
+    @use_profile('postgres')
+    def test_postgres_schema_test_selection(self):
+        results = self.run_dbt()
+        self.assertEqual(len(results), 5)
+        test_results = self.run_dbt(['test', '--models', 'tag:table_favorite_color'])
+        self.assertEqual(len(test_results), 5)  # 1 in table_copy, 4 in table_summary
+        for result in test_results:
+            self.assertTestPassed(result)
+
+        test_results = self.run_dbt(['test', '--models', 'tag:favorite_number_is_pi'])
+        self.assertEqual(len(test_results), 1)
+        self.assertTestPassed(test_results[0])
+
+        test_results = self.run_dbt(['test', '--models', 'tag:table_copy_favorite_color'])
+        self.assertEqual(len(test_results), 1)
+        self.assertTestPassed(test_results[0])
+
+
+    @use_profile('postgres')
+    def test_postgres_schema_test_exclude_failures(self):
+        results = self.run_dbt()
+        self.assertEqual(len(results), 5)
+        test_results = self.run_dbt(['test', '--exclude', 'tag:xfail'])
+        # If the failed + disabled model's tests ran, there would be 20 of these.
+        self.assertEqual(len(test_results), 13)
+        for result in test_results:
+            self.assertTestPassed(result)
+        test_results = self.run_dbt(['test', '--models', 'tag:xfail'], expect_pass=False)
+        self.assertEqual(len(test_results), 6)
+        for result in test_results:
+            self.assertTestFailed(result)
+
 
 class TestMalformedSchemaTests(DBTIntegrationTest):
 
@@ -77,20 +115,58 @@ class TestMalformedSchemaTests(DBTIntegrationTest):
         return test_task.run()
 
     @use_profile('postgres')
-    def test_malformed_schema_test_wont_brick_run(self):
-        # dbt run should work (Despite broken schema test)
-        results = self.run_dbt(strict=False)
-        self.assertEqual(len(results), 2)
-
-        # in v2, we skip the entire model
-        ran_tests = self.run_schema_validations()
-        self.assertEqual(len(ran_tests), 5)
-        self.assertEqual(sum(x.status for x in ran_tests), 0)
-
-    @use_profile('postgres')
-    def test_malformed_schema_strict_will_break_run(self):
+    def test_postgres_malformed_schema_strict_will_break_run(self):
         with self.assertRaises(CompilationException):
             self.run_dbt(strict=True)
+        # even if strict = False!
+        with self.assertRaises(CompilationException):
+            self.run_dbt(strict=False)
+
+
+class TestMalformedMacroTests(DBTIntegrationTest):
+
+    def setUp(self):
+        DBTIntegrationTest.setUp(self)
+        self.run_sql_file("seed.sql")
+
+    @property
+    def schema(self):
+        return "schema_tests_008"
+
+    @property
+    def models(self):
+        return "models-v2/custom-bad-test-macro"
+
+    @property
+    def project_config(self):
+        return {
+            'config-version': 2,
+            "macro-paths": ["macros-v2/malformed"],
+        }
+
+    def run_schema_validations(self):
+        args = FakeArgs()
+        test_task = TestTask(args, self.config)
+        return test_task.run()
+
+    @use_profile('postgres')
+    def test_postgres_malformed_macro_reports_error(self):
+        self.run_dbt(['deps'])
+        self.run_dbt(strict=True)
+        expected_failure = 'not_null'
+
+        test_results = self.run_schema_validations()
+
+        self.assertEqual(len(test_results), 2)
+
+        for result in test_results:
+            self.assertTrue(result.error is not None or result.fail)
+            # Assert that error is thrown for empty schema test
+            if result.error is not None:
+                self.assertIn("Returned 0 rows", result.error)
+            # Assert that failure occurs for normal schema test
+            elif result.fail:
+                self.assertIn(expected_failure, result.node.name)
 
 
 class TestHooksInTests(DBTIntegrationTest):
@@ -107,12 +183,13 @@ class TestHooksInTests(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             "on-run-start": ["{{ exceptions.raise_compiler_error('hooks called in tests -- error') if execute }}"],
             "on-run-end": ["{{ exceptions.raise_compiler_error('hooks called in tests -- error') if execute }}"],
         }
 
     @use_profile('postgres')
-    def test_hooks_dont_run_for_tests(self):
+    def test_postgres_hooks_dont_run_for_tests(self):
         # This would fail if the hooks ran
         results = self.run_dbt(['test', '--model', 'ephemeral'])
         self.assertEqual(len(results), 1)
@@ -122,8 +199,9 @@ class TestHooksInTests(DBTIntegrationTest):
             # status = # of failing rows
             self.assertEqual(
                 result.status, 0,
-                'test {} failed'.format(result.node.get('name'))
+                'test {} failed'.format(result.node.name)
             )
+
 
 class TestCustomSchemaTests(DBTIntegrationTest):
 
@@ -145,7 +223,7 @@ class TestCustomSchemaTests(DBTIntegrationTest):
                 },
                 {
                     'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
-                    'warn-unpinned': False,
+                    'revision': 'dbt/0.17.0',
                 },
             ]
         }
@@ -156,7 +234,8 @@ class TestCustomSchemaTests(DBTIntegrationTest):
         # dbt-integration-project contains a schema.yml file
         # both should work!
         return {
-            "macro-paths": ["macros-v2"],
+            'config-version': 2,
+            "macro-paths": ["macros-v2/macros"],
         }
 
     @property
@@ -170,9 +249,9 @@ class TestCustomSchemaTests(DBTIntegrationTest):
         return test_task.run()
 
     @use_profile('postgres')
-    def test_schema_tests(self):
+    def test_postgres_schema_tests(self):
         self.run_dbt(["deps"])
-        results = self.run_dbt()
+        results = self.run_dbt(strict=False)  # dbt-utils 0.13-support is config version 1
         self.assertEqual(len(results), 4)
 
         test_results = self.run_schema_validations()
@@ -217,12 +296,12 @@ class TestBQSchemaTests(DBTIntegrationTest):
 
         for result in test_results:
             # assert that all deliberately failing tests actually fail
-            if 'failure' in result.node.get('name'):
+            if 'failure' in result.node.name:
                 self.assertIsNone(result.error)
                 self.assertFalse(result.skipped)
                 self.assertTrue(
                     result.status > 0,
-                    'test {} did not fail'.format(result.node.get('name'))
+                    'test {} did not fail'.format(result.node.name)
                 )
 
             # assert that actual tests pass
@@ -232,7 +311,97 @@ class TestBQSchemaTests(DBTIntegrationTest):
                 # status = # of failing rows
                 self.assertEqual(
                     result.status, 0,
-                    'test {} failed'.format(result.node.get('name'))
+                    'test {} failed'.format(result.node.name)
                 )
 
         self.assertEqual(sum(x.status for x in test_results), 0)
+
+
+class TestQuotedSchemaTestColumns(DBTIntegrationTest):
+    @property
+    def schema(self):
+        return "schema_tests_008"
+
+    @property
+    def models(self):
+        return "quote-required-models"
+
+    @use_profile('postgres')
+    def test_postgres_quote_required_column(self):
+        results = self.run_dbt()
+        self.assertEqual(len(results), 3)
+        results = self.run_dbt(['test', '-m', 'model'])
+        self.assertEqual(len(results), 2)
+        results = self.run_dbt(['test', '-m', 'model_again'])
+        self.assertEqual(len(results), 2)
+        results = self.run_dbt(['test', '-m', 'model_noquote'])
+        self.assertEqual(len(results), 2)
+        results = self.run_dbt(['test', '-m', 'source:my_source'])
+        self.assertEqual(len(results), 1)
+        results = self.run_dbt(['test', '-m', 'source:my_source_2'])
+        self.assertEqual(len(results), 2)
+
+
+class TestVarsSchemaTests(DBTIntegrationTest):
+    @property
+    def schema(self):
+        return "schema_tests_008"
+
+    @property
+    def models(self):
+        return "models-v2/render_test_arg_models"
+
+    @property
+    def project_config(self):
+        return {
+            'config-version': 2,
+            "macro-paths": ["macros-v2/macros"],
+        }
+
+    @use_profile('postgres')
+    def test_postgres_argument_rendering(self):
+        results = self.run_dbt()
+        self.assertEqual(len(results), 1)
+        results = self.run_dbt(['test', '--vars', '{myvar: foo}'])
+        self.assertEqual(len(results), 1)
+        self.run_dbt(['test'], expect_pass=False)
+
+
+class TestSchemaCaseInsensitive(DBTIntegrationTest):
+    @property
+    def schema(self):
+        return "schema_tests_008"
+
+    @property
+    def models(self):
+        return "case-sensitive-models"
+
+    @use_profile('postgres')
+    def test_postgres_schema_lowercase_sql(self):
+        results = self.run_dbt(strict=False)
+        self.assertEqual(len(results), 2)
+        results = self.run_dbt(['test', '-m', 'lowercase'], strict=False)
+        self.assertEqual(len(results), 1)
+
+    @use_profile('postgres')
+    def test_postgres_schema_uppercase_sql(self):
+        results = self.run_dbt(strict=False)
+        self.assertEqual(len(results), 2)
+        results = self.run_dbt(['test', '-m', 'uppercase'], strict=False)
+        self.assertEqual(len(results), 1)
+
+
+class TestSchemaYAMLExtension(DBTIntegrationTest):
+    @property
+    def schema(self):
+        return "schema_tests_008"
+
+    @property
+    def models(self):
+        return "case-sensitive-models"
+
+    @use_profile('postgres')
+    def test_postgres_yaml_extension(self):
+        with self.assertRaises(Exception) as exc:
+            self.run_dbt(["run"])
+        self.assertIn('yaml', str(exc.exception))

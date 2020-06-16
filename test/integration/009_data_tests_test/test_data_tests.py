@@ -11,6 +11,7 @@ class TestDataTests(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             "test-paths": [self.test_path]
         }
 
@@ -41,7 +42,7 @@ class TestDataTests(DBTIntegrationTest):
 
         for result in test_results:
             # assert that all deliberately failing tests actually fail
-            if 'fail' in result.node.get('name'):
+            if 'fail' in result.node.name:
                 self.assertIsNone(result.error)
                 self.assertFalse(result.skipped)
                 self.assertTrue(result.status > 0)
@@ -70,7 +71,7 @@ class TestDataTests(DBTIntegrationTest):
 
         for result in test_results:
             # assert that all deliberately failing tests actually fail
-            if 'fail' in result.node.get('name'):
+            if 'fail' in result.node.name:
                 self.assertIsNone(result.error)
                 self.assertFalse(result.skipped)
                 self.assertTrue(result.status > 0)

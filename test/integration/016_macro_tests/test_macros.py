@@ -19,23 +19,27 @@ class TestMacros(DBTIntegrationTest):
     def packages_config(self):
         return {
             'packages': [
-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False}
+                {
+                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
+                    'revision': 'dbt/0.17.0',
+                },
             ]
         }
 
     @property
     def project_config(self):
         return {
-            "models": {
-                "vars": {
-                    "test": "DUMMY"
-                }
+            'config-version': 2,
+            'vars': {
+                'test': {
+                    'test': 'DUMMY',
+                },
             },
             "macro-paths": ["macros"],
         }
 
     @use_profile('postgres')
-    def test_working_macros(self):
+    def test_postgres_working_macros(self):
         self.run_dbt(["deps"])
         results = self.run_dbt(["run"])
         self.assertEqual(len(results), 6)
@@ -60,11 +64,12 @@ class TestInvalidMacros(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             "macro-paths": ["bad-macros"]
         }
 
     @use_profile('postgres')
-    def test_invalid_macro(self):
+    def test_postgres_invalid_macro(self):
 
         try:
             self.run_dbt(["run"], expect_pass=False)
@@ -92,13 +97,17 @@ class TestMisusedMacros(DBTIntegrationTest):
     def packages_config(self):
         return {
             'packages': [
-                {'git': 'https://github.com/fishtown-analytics/dbt-integration-project', 'warn-unpinned': False}
+                {
+                    'git': 'https://github.com/fishtown-analytics/dbt-integration-project',
+                    'revision': 'dbt/0.17.0',
+                }
             ]
         }
 
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             "macro-paths": ["macros"],
         }
 

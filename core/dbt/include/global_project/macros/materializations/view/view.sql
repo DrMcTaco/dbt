@@ -51,6 +51,8 @@
   {% endif %}
   {{ adapter.rename_relation(intermediate_relation, target_relation) }}
 
+  {% do persist_docs(target_relation, model) %}
+
   {{ run_hooks(post_hooks, inside_transaction=True) }}
 
   {{ adapter.commit() }}
@@ -58,5 +60,7 @@
   {{ drop_relation_if_exists(backup_relation) }}
 
   {{ run_hooks(post_hooks, inside_transaction=False) }}
+
+  {{ return({'relations': [target_relation]}) }}
 
 {%- endmaterialization -%}

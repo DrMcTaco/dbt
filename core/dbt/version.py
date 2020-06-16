@@ -1,4 +1,9 @@
+import importlib
+import importlib.util
+import os
+import glob
 import json
+from typing import Iterator
 
 import requests
 
@@ -37,24 +42,59 @@ def get_version_information():
     version_msg = ("installed version: {}\n"
                    "   latest version: {}\n\n".format(installed_s, latest_s))
 
+    plugin_version_msg = "Plugins:\n"
+    for plugin_name, version in _get_dbt_plugins_info():
+        plugin_version_msg += '  - {plugin_name}: {version}\n'.format(
+            plugin_name=plugin_name, version=version
+        )
     if latest is None:
         return ("{}The latest version of dbt could not be determined!\n"
-                "Make sure that the following URL is accessible:\n{}"
-                .format(version_msg, PYPI_VERSION_URL))
+                "Make sure that the following URL is accessible:\n{}\n\n{}"
+                .format(version_msg, PYPI_VERSION_URL, plugin_version_msg))
 
     if installed == latest:
-        return "{}Up to date!".format(version_msg)
+        return "{}Up to date!\n\n{}".format(version_msg, plugin_version_msg)
 
     elif installed > latest:
         return ("{}Your version of dbt is ahead of the latest "
-                "release!".format(version_msg))
+                "release!\n\n{}".format(version_msg, plugin_version_msg))
 
     else:
         return ("{}Your version of dbt is out of date! "
                 "You can find instructions for upgrading here:\n"
-                "https://docs.getdbt.com/docs/installation"
-                .format(version_msg))
+                "https://docs.getdbt.com/docs/installation\n\n{}"
+                .format(version_msg, plugin_version_msg))
 
 
-__version__ = '0.14.1'
+def _get_adapter_plugin_names() -> Iterator[str]:
+    spec = importlib.util.find_spec('dbt.adapters')
+    # If None, then nothing provides an importable 'dbt.adapters', so we will
+    # not be reporting plugin versions today
+    if spec is None or spec.submodule_search_locations is None:
+        return
+    for adapters_path in spec.submodule_search_locations:
+        version_glob = os.path.join(adapters_path, '*', '__version__.py')
+        for version_path in glob.glob(version_glob):
+            # the path is like .../dbt/adapters/{plugin_name}/__version__.py
+            # except it could be \\ on windows!
+            plugin_root, _ = os.path.split(version_path)
+            _, plugin_name = os.path.split(plugin_root)
+            yield plugin_name
+
+
+def _get_dbt_plugins_info():
+    for plugin_name in _get_adapter_plugin_names():
+        if plugin_name == 'core':
+            continue
+        try:
+            mod = importlib.import_module(
+                f'dbt.adapters.{plugin_name}.__version__'
+            )
+        except ImportError:
+            # not an adpater
+            continue
+        yield plugin_name, mod.version
+
+
+__version__ = '0.18.0b1'
 installed = get_installed_version()
